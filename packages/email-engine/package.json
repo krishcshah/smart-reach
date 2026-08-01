@@ -20,7 +20,7 @@
   "dependencies": {
     "@smartreach/database": "*",
     "@smartreach/shared": "*",
-    "drizzle-orm": "^0.44.2",
+    "drizzle-orm": "^0.45.2",
     "imapflow": "^1.0.191",
     "nodemailer": "^7.0.3"
   },

@@ -22,7 +22,10 @@
     "node": ">=20",
     "npm": ">=10"
   },
+  "dependencies": {
+    "drizzle-orm": "^0.45.2"
+  },
   "overrides": {
-    "drizzle-orm": "^0.44.7"
+    "drizzle-orm": "^0.45.2"
   }
 }
