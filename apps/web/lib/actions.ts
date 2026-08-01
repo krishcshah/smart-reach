@@ -687,6 +687,57 @@ export async function testSenderConnection(input: unknown): Promise<
   }
 }
 
+/* ═══ UNIBOX — reply to a received reply via the inbox sender's SMTP ═══ */
+export async function sendUniboxReply(input: {
+  replyId: string;
+  body: string;
+}): Promise<ActionResult> {
+  const user = await requireUser();
+  const body = input?.body?.toString().trim();
+  if (!body) return { ok: false, error: "Write something before sending" };
+
+  const db = getDb();
+  try {
+    const [reply] = await db
+      .select()
+      .from(schema.replies)
+      .where(and(eq(schema.replies.id, input.replyId), eq(schema.replies.userId, user.id)))
+      .limit(1);
+    if (!reply) return { ok: false, error: "Reply not found" };
+
+    const [sender] = await db
+      .select()
+      .from(schema.senderAccounts)
+      .where(and(eq(schema.senderAccounts.id, reply.senderId), eq(schema.senderAccounts.userId, user.id)))
+      .limit(1);
+    if (!sender) return { ok: false, error: "Sender account not found" };
+
+    const { sendMail } = await import("@smartreach/email-engine/mailer");
+    const subject = reply.subject?.startsWith("Re:") ? reply.subject : `Re: ${reply.subject ?? ""}`.trim();
+    await sendMail(sender as never, {
+      to: reply.fromEmail,
+      subject: subject === "Re:" ? "Re: Your email" : subject,
+      text: body,
+    });
+
+    // Log + mark this reply read
+    await db
+      .update(schema.replies)
+      .set({ readAt: nowIso() })
+      .where(eq(schema.replies.id, reply.id));
+    await logActivity(user.id, "unibox.replied", `Replied to ${reply.fromEmail}`, reply.campaignId, {
+      replyId: reply.id,
+    });
+    revalidatePath("/unibox");
+    return { ok: true, message: `Reply sent to ${reply.fromEmail}` };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Failed to send reply (check SMTP settings)",
+    };
+  }
+}
+
 /* ═══ SETTINGS — test connection placeholder (worker does the real test) ═══ */
 
 export async function sendTestEmail(): Promise<ActionResult> {
