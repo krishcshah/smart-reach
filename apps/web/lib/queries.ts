@@ -21,48 +21,54 @@ export async function getDashboardStats(userId: string) {
   const db = getDb();
   const t = today();
 
-  const [campaignRows] = await db
-    .select({
-      active: count(sql`case when ${campaigns.status} = 'running' then 1 end`),
-      scheduled: count(sql`case when ${campaigns.status} = 'scheduled' then 1 end`),
-    })
-    .from(campaigns)
-    .where(and(eq(campaigns.userId, userId), isNull(campaigns.deletedAt)));
-
-  const [usageRows] = await db
-    .select({
-      queuedToday: count(sql`case when ${usageCounters.entityType} = 'sender' then ${usageCounters.count} end`),
-    })
-    .from(usageCounters)
-    .where(and(eq(usageCounters.userId, userId), eq(usageCounters.date, t)));
-
-  const [jobsToday] = await db
-    .select({
-      sent: count(sql`case when ${emailJobs.status} = 'sent' then 1 end`),
-      queued: count(sql`case when ${emailJobs.status} in ('pending','retry','processing') then 1 end`),
-      failed: count(sql`case when ${emailJobs.status} = 'failed' then 1 end`),
-    })
-    .from(emailJobs)
-    .innerJoin(campaigns, eq(emailJobs.campaignId, campaigns.id))
-    .where(and(eq(campaigns.userId, userId), gte(emailJobs.createdAt, `${t}T00:00:00Z`)));
-
-  const [leadRows] = await db
-    .select({ total: count() })
-    .from(leads)
-    .where(and(eq(leads.userId, userId), isNull(leads.deletedAt)));
-
-  const [senderRows] = await db
-    .select({
-      total: count(),
-      active: count(sql`case when ${senderAccounts.status} = 'active' then 1 end`),
-    })
-    .from(senderAccounts)
-    .where(and(eq(senderAccounts.userId, userId), isNull(senderAccounts.deletedAt)));
-
-  const [replyRows] = await db
-    .select({ total: count() })
-    .from(replies)
-    .where(eq(replies.userId, userId));
+  // Fire all six independent aggregates in parallel — one Neon hop (~120ms)
+  // instead of six sequential hops (~720ms). This is the dashboard's hot path.
+  const [
+    [campaignRows],
+    [usageRows],
+    [jobsToday],
+    [leadRows],
+    [senderRows],
+    [replyRows],
+  ] = await Promise.all([
+    db
+      .select({
+        active: count(sql`case when ${campaigns.status} = 'running' then 1 end`),
+        scheduled: count(sql`case when ${campaigns.status} = 'scheduled' then 1 end`),
+      })
+      .from(campaigns)
+      .where(and(eq(campaigns.userId, userId), isNull(campaigns.deletedAt))),
+    db
+      .select({
+        queuedToday: count(sql`case when ${usageCounters.entityType} = 'sender' then ${usageCounters.count} end`),
+      })
+      .from(usageCounters)
+      .where(and(eq(usageCounters.userId, userId), eq(usageCounters.date, t))),
+    db
+      .select({
+        sent: count(sql`case when ${emailJobs.status} = 'sent' then 1 end`),
+        queued: count(sql`case when ${emailJobs.status} in ('pending','retry','processing') then 1 end`),
+        failed: count(sql`case when ${emailJobs.status} = 'failed' then 1 end`),
+      })
+      .from(emailJobs)
+      .innerJoin(campaigns, eq(emailJobs.campaignId, campaigns.id))
+      .where(and(eq(campaigns.userId, userId), gte(emailJobs.createdAt, `${t}T00:00:00Z`))),
+    db
+      .select({ total: count() })
+      .from(leads)
+      .where(and(eq(leads.userId, userId), isNull(leads.deletedAt))),
+    db
+      .select({
+        total: count(),
+        active: count(sql`case when ${senderAccounts.status} = 'active' then 1 end`),
+      })
+      .from(senderAccounts)
+      .where(and(eq(senderAccounts.userId, userId), isNull(senderAccounts.deletedAt))),
+    db
+      .select({ total: count() })
+      .from(replies)
+      .where(eq(replies.userId, userId)),
+  ]);
 
   return {
     activeCampaigns: Number(campaignRows?.active ?? 0),
@@ -274,26 +280,29 @@ export async function getCampaign(userId: string, id: string) {
     .where(and(eq(campaigns.id, id), eq(campaigns.userId, userId), isNull(campaigns.deletedAt)))
     .limit(1);
   if (!c) return null;
-  const [stats] = await db
-    .select({
-      total: count(campaignLeads.id),
-      sent: count(sql`case when ${campaignLeads.status} in ('sent','replied') then 1 end`),
-      replied: count(sql`case when ${campaignLeads.status} = 'replied' then 1 end`),
-      failed: count(sql`case when ${campaignLeads.status} = 'failed' then 1 end`),
-    })
-    .from(campaignLeads)
-    .where(eq(campaignLeads.campaignId, id));
-  const senders = await db
-    .select({
-      id: senderAccounts.id,
-      senderName: senderAccounts.senderName,
-      email: senderAccounts.email,
-      status: senderAccounts.status,
-      health: senderAccounts.health,
-    })
-    .from(campaignSenders)
-    .innerJoin(senderAccounts, eq(senderAccounts.id, campaignSenders.senderId))
-    .where(eq(campaignSenders.campaignId, id));
+  // Parallel: these two reads are independent of one another.
+  const [[stats], senders] = await Promise.all([
+    db
+      .select({
+        total: count(campaignLeads.id),
+        sent: count(sql`case when ${campaignLeads.status} in ('sent','replied') then 1 end`),
+        replied: count(sql`case when ${campaignLeads.status} = 'replied' then 1 end`),
+        failed: count(sql`case when ${campaignLeads.status} = 'failed' then 1 end`),
+      })
+      .from(campaignLeads)
+      .where(eq(campaignLeads.campaignId, id)),
+    db
+      .select({
+        id: senderAccounts.id,
+        senderName: senderAccounts.senderName,
+        email: senderAccounts.email,
+        status: senderAccounts.status,
+        health: senderAccounts.health,
+      })
+      .from(campaignSenders)
+      .innerJoin(senderAccounts, eq(senderAccounts.id, campaignSenders.senderId))
+      .where(eq(campaignSenders.campaignId, id)),
+  ]);
   return { ...c, stats, senders };
 }
 
