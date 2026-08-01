@@ -517,15 +517,19 @@ export async function createCampaign(input: unknown): Promise<ActionResult<{ id:
       .insert(campaignSenders)
       .values(d.senderIds.map((senderId) => ({ campaignId: campaign.id, senderId })));
 
-    // Snapshot the list's pending leads into the campaign so the engine can queue them.
+    // Snapshot the list's sendable leads into the campaign. A lead's overall
+    // status is per-campaign (tracked in campaign_leads), not global — so we
+    // take any lead that hasn't hard-bounced/replied/completed. We do NOT
+    // mutate lead.status here; doing so would lock leads into one campaign
+    // and make them invisible to the next one ("0 leads").
     const listLeads = await db
       .select({ id: leads.id })
       .from(leads)
       .where(
         and(
           eq(leads.listId, d.leadListId),
-          eq(leads.status, "pending"),
           sql`${leads.deletedAt} is null`,
+          inArray(leads.status, ["pending", "queued", "sent", "failed"]),
         ),
       );
 
@@ -543,17 +547,6 @@ export async function createCampaign(input: unknown): Promise<ActionResult<{ id:
           )
           .onConflictDoNothing();
       }
-      // Mark those leads as queued
-      await db
-        .update(leads)
-        .set({ status: "queued", updatedAt: nowIso() })
-        .where(
-          and(
-            eq(leads.listId, d.leadListId),
-            eq(leads.status, "pending"),
-            sql`${leads.deletedAt} is null`,
-          ),
-        );
     }
 
     await logActivity(
