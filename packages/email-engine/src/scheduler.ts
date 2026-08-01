@@ -95,6 +95,9 @@ export async function scheduleCampaign(
 ): Promise<{ enqueued: number; note?: string }> {
   const nowIsoS = now.toISOString();
 
+  // Never enqueue outside the sender's sending window / non-business-day.
+  if (!isInSendingWindow(campaign, now)) return { enqueued: 0, note: "outside-window" };
+
   // Daily campaign cap
   const sentToday = await campaignSentToday(db, campaign.id);
   if (sentToday >= campaign.dailyLimit) return { enqueued: 0, note: "daily-limit" };
