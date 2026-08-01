@@ -204,6 +204,22 @@ export function CampaignWizard({
               </p>
             ) : (
               <div className="space-y-2">
+                <div className="flex items-center justify-between rounded-lg border bg-muted/30 px-4 py-2.5">
+                  <label className="flex cursor-pointer items-center gap-2.5 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={senders.length > 0 && senderIds.size === senders.length}
+                      onChange={(e) =>
+                        setSenderIds(e.target.checked ? new Set(senders.map((s) => s.id)) : new Set())
+                      }
+                    />
+                    Select all
+                  </label>
+                  <span className="text-xs text-muted-foreground">
+                    {senderIds.size}/{senders.length} selected
+                  </span>
+                </div>
                 {senders.map((s) => (
                   <label key={s.id}
                     className={cn(
