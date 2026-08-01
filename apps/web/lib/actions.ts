@@ -647,6 +647,53 @@ export async function campaignAction(
   }
 }
 
+/** Live SMTP + IMAP check from the Add-Sender form. Never stores — just verifies. */
+export async function testSenderConnection(input: unknown): Promise<
+  ActionResult<{
+    smtp: { ok: boolean; message: string; latencyMs?: number };
+    imap: { ok: boolean; message: string; latencyMs?: number };
+  }>
+> {
+  await requireUser(); // auth only — anyone logged in can test their own unsaved creds
+  const parsed = senderCreateSchema
+    .pick({
+      smtpHost: true,
+      smtpPort: true,
+      smtpUsername: true,
+      smtpPassword: true,
+      smtpSecurity: true,
+      imapHost: true,
+      imapPort: true,
+      imapUsername: true,
+      imapPassword: true,
+    })
+    .safeParse(input ?? {});
+  if (!parsed.success) return zodFail(parsed.error);
+
+  try {
+    const { testConnection } = await import("@smartreach/email-engine/mailer");
+    const d = parsed.data;
+    const result = await testConnection({
+      email: "probe",
+      fromName: "",
+      replyTo: "",
+      smtpHost: d.smtpHost,
+      smtpPort: d.smtpPort,
+      smtpUsername: d.smtpUsername,
+      // The engine's testConnection decrypts, so encrypt before passing.
+      smtpPasswordEnc: encryptSecret(d.smtpPassword),
+      smtpSecurity: d.smtpSecurity,
+      imapHost: d.imapHost,
+      imapPort: d.imapPort,
+      imapUsername: d.imapUsername,
+      imapPasswordEnc: d.imapPassword ? encryptSecret(d.imapPassword) : "",
+    } as never);
+    return { ok: true, data: result };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Connection test failed" };
+  }
+}
+
 /* ═══ SETTINGS — test connection placeholder (worker does the real test) ═══ */
 
 export async function sendTestEmail(): Promise<ActionResult> {

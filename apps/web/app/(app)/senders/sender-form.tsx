@@ -19,23 +19,54 @@ import {
   SelectValue,
   Textarea,
 } from "@smartreach/ui";
-import { createSender } from "@/lib/actions";
+import { createSender, testSenderConnection } from "@/lib/actions";
+
+type ConnResult = {
+  smtp: { ok: boolean; message: string; latencyMs?: number };
+  imap: { ok: boolean; message: string; latencyMs?: number };
+};
 
 export function SenderForm() {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [f, setF] = useState<Record<string, string>>({});
-  const [test, setTest] = useState<null | { smtp: boolean; imap: boolean; message: string }>(null);
+  const [testing, setTesting] = useState(false);
+  const [test, setTest] = useState<ConnResult | null>(null);
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setF((p) => ({ ...p, [k]: e.target.value }));
+
+  const runTest = () => {
+    setTest(null);
+    if (!f.smtpHost || !f.smtpUsername || !f.smtpPassword) {
+      toast.error("Fill in SMTP host, username and password first");
+      return;
+    }
+    setTesting(true);
+    testSenderConnection({
+      smtpHost: f.smtpHost,
+      smtpPort: Number(f.smtpPort ?? 587),
+      smtpUsername: f.smtpUsername,
+      smtpPassword: f.smtpPassword,
+      smtpSecurity: (f.smtpSecurity as "tls" | "ssl" | "none") ?? "tls",
+      imapHost: f.imapHost ?? "",
+      imapPort: Number(f.imapPort ?? 993),
+      imapUsername: f.imapUsername ?? "",
+      imapPassword: f.imapPassword ?? "",
+    })
+      .then((res) => {
+        if (res.ok && res.data) setTest(res.data);
+        else if (!res.ok) toast.error(res.error);
+      })
+      .catch((e) => toast.error(e instanceof Error ? e.message : "Test failed"))
+      .finally(() => setTesting(false));
+  };
 
   const submit = (testOnly: boolean) =>
     start(async () => {
       setTest(null);
       if (testOnly) {
-        // The real handshake runs in the background worker; emulate the check UI.
-        setTest({ smtp: true, imap: !!f.imapHost, message: "Connection queued — the worker verifies SMTP/IMAP in the background." });
+        runTest();
         return;
       }
       const res = await createSender({
@@ -135,16 +166,22 @@ export function SenderForm() {
       </Section>
 
       {test && (
-        <Alert variant={test.smtp ? "success" : "destructive"}>
+        <Alert variant={test.smtp.ok ? "success" : "destructive"}>
           <AlertTitle className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5">
-              {test.smtp ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />} SMTP {test.smtp ? "working" : "failed"}
+            <span className={`flex items-center gap-1.5 ${test.smtp.ok ? "" : "text-destructive"}`}>
+              {test.smtp.ok ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+              SMTP {test.smtp.ok ? `working${test.smtp.latencyMs != null ? ` · ${test.smtp.latencyMs}ms` : ""}` : "failed"}
             </span>
-            <span className="flex items-center gap-1.5">
-              {test.imap ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />} IMAP {test.imap ? "working" : "not configured"}
+            <span className={`flex items-center gap-1.5 ${test.imap.ok ? "" : "text-muted-foreground"}`}>
+              {test.imap.ok ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+              IMAP {test.imap.ok ? `working${test.imap.latencyMs != null ? ` · ${test.imap.latencyMs}ms` : ""}` : f.imapHost ? "failed" : "not configured"}
             </span>
           </AlertTitle>
-          <AlertDescription>{test.message}</AlertDescription>
+          <AlertDescription>
+            {test.smtp.message}
+            {test.smtp.message && test.imap.message ? " · " : ""}
+            {test.imap.message}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -153,8 +190,9 @@ export function SenderForm() {
           {pending && !test ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           Save sender
         </Button>
-        <Button type="button" variant="outline" disabled={pending} onClick={() => submit(true)}>
-          <Plug className="h-4 w-4" /> Test connection
+        <Button type="button" variant="outline" disabled={pending || testing} onClick={() => submit(true)}>
+          {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plug className="h-4 w-4" />}
+          {testing ? "Testing…" : "Test connection"}
         </Button>
         <p className="text-xs text-muted-foreground">
           Credentials are encrypted before they're stored. Never sent back to the browser.
