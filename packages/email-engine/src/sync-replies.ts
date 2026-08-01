@@ -177,7 +177,7 @@ export async function syncTick(db: EngineDb): Promise<SyncResult> {
   const senders: SenderRow[] = await db
     .select()
     .from(schema.senderAccounts)
-    .where(and(eq(schema.senderAccounts.deletedAt, null as any), sql`imap_host != ''`));
+    .where(sql`${schema.senderAccounts.deletedAt} is null and ${schema.senderAccounts.imapHost} != ''`);
   for (const s of senders) {
     result.checked++;
     const r = await syncSenderReplies(db, s);
