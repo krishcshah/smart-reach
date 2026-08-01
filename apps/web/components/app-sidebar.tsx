@@ -2,6 +2,7 @@
 import {
   BarChart3,
   FileText,
+  Inbox,
   LayoutDashboard,
   LogOut,
   Mail,
@@ -18,6 +19,7 @@ import { ThemeToggle } from "./theme-toggle";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/unibox", label: "Unibox", icon: Inbox },
   { href: "/campaigns", label: "Campaigns", icon: Rocket },
   { href: "/leads", label: "Leads", icon: Users },
   { href: "/senders", label: "Senders", icon: Mail },
