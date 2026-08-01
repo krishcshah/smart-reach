@@ -1,0 +1,33 @@
+{
+  "name": "@smartreach/email-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./mailer": "./src/mailer.ts",
+    "./rotation": "./src/rotation.ts",
+    "./scheduler": "./src/scheduler.ts",
+    "./processor": "./src/processor.ts",
+    "./sync-replies": "./src/sync-replies.ts",
+    "./worker": "./src/worker.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@smartreach/database": "*",
+    "@smartreach/shared": "*",
+    "drizzle-orm": "^0.44.2",
+    "imapflow": "^1.0.191",
+    "nodemailer": "^7.0.3"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^6.4.20",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@smartreach/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts",
+    "./schema/auth": "./src/schema-auth.ts",
+    "./crypto": "./src/crypto.ts",
+    "./template": "./src/template.ts",
+    "./connection": "./src/connection.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@smartreach/shared": "*",
+    "drizzle-orm": "^0.44.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

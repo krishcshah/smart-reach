@@ -1,0 +1,28 @@
+{
+  "name": "smartreach",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SmartReach — the fastest, cleanest cold email platform. Everything you need. Nothing you don't.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @smartreach/web",
+    "build": "npm run build --workspaces --if-present",
+    "start": "npm run start --workspace @smartreach/web",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "db:generate": "npm run db:generate --workspace @smartreach/web",
+    "db:migrate": "npm run db:migrate --workspace @smartreach/web",
+    "db:seed": "npm run db:seed --workspace @smartreach/web",
+    "engine": "npm run start --workspace @smartreach/email-engine"
+  },
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
+  },
+  "overrides": {
+    "drizzle-orm": "^0.44.7"
+  }
+}

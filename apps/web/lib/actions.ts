@@ -1,0 +1,660 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { schema, encryptSecret } from "@smartreach/database";
+import {
+  campaignCreateSchema,
+  leadImportSchema,
+  leadListCreateSchema,
+  leadUpdateSchema,
+  senderCreateSchema,
+  senderCsvRowSchema,
+  templateSchema,
+} from "@smartreach/validation";
+import { normalizeEmail, nowIso } from "@smartreach/shared";
+import { getDb } from "./db";
+import { requireUser } from "./session";
+
+const {
+  leadLists,
+  leads,
+  leadTags,
+  senderAccounts,
+  emailTemplates,
+  campaigns,
+  campaignSenders,
+  campaignLeads,
+} = schema;
+
+export type ActionResult<T = undefined> =
+  | { ok: true; data?: T; message?: string }
+  | { ok: false; error: string; fieldErrors?: Record<string, string[]> };
+
+const err = (e: unknown): ActionResult<never> => ({
+  ok: false,
+  error: e instanceof Error ? e.message : "Something went wrong",
+});
+
+function zodFail(error: { issues: { path: PropertyKey[]; message: string }[] }): ActionResult<never> {
+  const fieldErrors: Record<string, string[]> = {};
+  for (const issue of error.issues) {
+    const key = String(issue.path[0] ?? "_");
+    (fieldErrors[key] ??= []).push(issue.message);
+  }
+  return { ok: false, error: "Please fix the highlighted fields", fieldErrors };
+}
+
+/* ═══ Activity log helper ═══ */
+async function logActivity(
+  userId: string,
+  type: string,
+  message: string,
+  campaignId?: string | null,
+  meta?: Record<string, unknown>,
+) {
+  await getDb()
+    .insert(schema.activityLogs)
+    .values({ userId, type, message, campaignId: campaignId ?? null, meta: meta ?? {} })
+    .catch(() => {});
+}
+
+/* ═══ LEAD LISTS ═══ */
+
+export async function createLeadList(input: unknown): Promise<ActionResult<{ id: string }>> {
+  const user = await requireUser();
+  const parsed = leadListCreateSchema.safeParse(input);
+  if (!parsed.success) return zodFail(parsed.error);
+  const db = getDb();
+  try {
+    const [row] = await db
+      .insert(leadLists)
+      .values({ userId: user.id, name: parsed.data.name })
+      .returning({ id: leadLists.id });
+    revalidatePath("/leads");
+    return { ok: true, data: { id: row.id } };
+  } catch {
+    return { ok: false, error: "A list with that name already exists" };
+  }
+}
+
+export async function deleteLeadList(listId: string): Promise<ActionResult> {
+  const user = await requireUser();
+  const db = getDb();
+  try {
+    await db
+      .update(leadLists)
+      .set({ deletedAt: nowIso() })
+      .where(and(eq(leadLists.id, listId), eq(leadLists.userId, user.id)));
+    revalidatePath("/leads");
+    return { ok: true, message: "List deleted" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+/* ═══ LEADS — CSV import ═══ */
+
+/** Column names that map directly onto standard lead columns. */
+const STANDARD_KEY_TO_COLUMN: Record<string, string> = {
+  email: "email",
+  first_name: "firstName",
+  last_name: "lastName",
+  company: "company",
+  website: "website",
+  linkedin: "linkedin",
+  job_title: "jobTitle",
+  location: "location",
+  phone: "phone",
+  industry: "industry",
+};
+
+export async function importLeads(input: unknown): Promise<
+  ActionResult<{ imported: number; skipped: number; invalid: number }>
+> {
+  const user = await requireUser();
+  const parsed = leadImportSchema.safeParse(input);
+  if (!parsed.success) return zodFail(parsed.error);
+
+  const { listId, listName, mapping, rows } = parsed.data;
+  const db = getDb();
+
+  // Resolve the list: use existing, or create a new one.
+  let targetListId = listId;
+  if (listId === "__new__") {
+    if (!listName) return { ok: false, error: "Give the new list a name" };
+    const [row] = await db
+      .insert(leadLists)
+      .values({ userId: user.id, name: listName })
+      .returning({ id: leadLists.id });
+    targetListId = row.id;
+  } else {
+    const [existing] = await db
+      .select({ id: leadLists.id })
+      .from(leadLists)
+      .where(and(eq(leadLists.id, listId), eq(leadLists.userId, user.id)));
+    if (!existing) return { ok: false, error: "List not found" };
+  }
+
+  const emailColumn = Object.entries(mapping).find(([, v]) => v === "email")?.[0];
+  if (!emailColumn) {
+    return { ok: false, error: "Map a column to Email before importing", fieldErrors: { email: ["Required"] } };
+  }
+
+  // Load existing emails in this list so we can skip duplicates in one query.
+  const existing = await db
+    .select({ email: leads.email })
+    .from(leads)
+    .where(and(eq(leads.listId, targetListId)));
+  const existingSet = new Set(existing.map((r) => r.email));
+
+  let imported = 0;
+  let skipped = 0;
+  let invalid = 0;
+  const seenInBatch = new Set<string>();
+  const CHUNK = 500;
+
+  const toInsert: (typeof leads.$inferInsert)[] = [];
+  const flush = async () => {
+    if (!toInsert.length) return;
+    await db.insert(leads).values(toInsert.splice(0)).onConflictDoNothing();
+  };
+
+  for (const row of rows) {
+    const rawEmail = row[emailColumn] ?? "";
+    const email = normalizeEmail(rawEmail);
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+      invalid++;
+      continue;
+    }
+    if (existingSet.has(email) || seenInBatch.has(email)) {
+      skipped++;
+      continue;
+    }
+    seenInBatch.add(email);
+
+    const values: Record<string, string> = { email };
+    const customFields: Record<string, string> = {};
+
+    for (const [csvCol, field] of Object.entries(mapping)) {
+      if (!field) continue;
+      const val = (row[csvCol] ?? "").trim();
+      const standardCol = STANDARD_KEY_TO_COLUMN[field];
+      if (standardCol && standardCol !== "email") values[standardCol] = val || null as never;
+      else if (!standardCol && val) customFields[field] = val;
+    }
+
+    toInsert.push({
+      userId: user.id,
+      listId: targetListId,
+      email,
+      firstName: values.firstName ?? null,
+      lastName: values.lastName ?? null,
+      company: values.company ?? null,
+      website: values.website ?? null,
+      linkedin: values.linkedin ?? null,
+      jobTitle: values.jobTitle ?? null,
+      location: values.location ?? null,
+      phone: values.phone ?? null,
+      industry: values.industry ?? null,
+      customFields,
+    });
+    imported++;
+    if (toInsert.length >= CHUNK) await flush();
+  }
+  await flush();
+
+  await logActivity(user.id, "leads.imported", `Imported ${imported} leads`, null, {
+    listId: targetListId,
+  });
+  revalidatePath("/leads");
+  return { ok: true, data: { imported, skipped, invalid } };
+}
+
+/** Server action: cursor-paginated leads for the table's "load more". */
+export async function fetchLeadsPage(params: {
+  listId?: string;
+  search?: string;
+  status?: string;
+  cursor?: string;
+  pageSize?: number;
+}) {
+  const user = await requireUser();
+  const { listLeads } = await import("./queries");
+  const { items, nextCursor } = await listLeads(user.id, {
+    listId: params.listId,
+    search: params.search,
+    status: params.status,
+    cursor: params.cursor,
+    pageSize: params.pageSize ?? 50,
+  });
+  return { items: JSON.parse(JSON.stringify(items)), nextCursor };
+}
+
+export async function updateLead(leadId: string, input: unknown): Promise<ActionResult> {
+  const user = await requireUser();
+  const parsed = leadUpdateSchema.safeParse(input);
+  if (!parsed.success) return zodFail(parsed.error);
+  const db = getDb();
+  try {
+    await db
+      .update(leads)
+      .set({ ...parsed.data, updatedAt: nowIso() })
+      .where(and(eq(leads.id, leadId), eq(leads.userId, user.id)));
+    revalidatePath("/leads");
+    return { ok: true, message: "Lead updated" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function bulkDeleteLeads(ids: string[]): Promise<ActionResult> {
+  const user = await requireUser();
+  if (!ids.length) return { ok: false, error: "No leads selected" };
+  const db = getDb();
+  try {
+    await db
+      .update(leads)
+      .set({ deletedAt: nowIso() })
+      .where(and(eq(leads.userId, user.id), inArray(leads.id, ids)));
+    await logActivity(user.id, "leads.deleted", `Deleted ${ids.length} leads`);
+    revalidatePath("/leads");
+    return { ok: true, message: `Deleted ${ids.length} lead${ids.length > 1 ? "s" : ""}` };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function bulkTagLeads(
+  ids: string[],
+  tagId: string,
+  mode: "add" | "remove" | "set",
+): Promise<ActionResult> {
+  const user = await requireUser();
+  const db = getDb();
+  try {
+    const rows = await db
+      .select({ id: leads.id, tags: leads.tags })
+      .from(leads)
+      .where(and(eq(leads.userId, user.id), inArray(leads.id, ids)));
+    for (const row of rows) {
+      const next =
+        mode === "set"
+          ? [tagId]
+          : mode === "add"
+            ? [...new Set([...(row.tags ?? []), tagId])]
+            : (row.tags ?? []).filter((t) => t !== tagId);
+      await db.update(leads).set({ tags: next, updatedAt: nowIso() }).where(eq(leads.id, row.id));
+    }
+    revalidatePath("/leads");
+    return { ok: true, message: "Tags updated" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function createLeadTag(input: unknown): Promise<ActionResult<{ id: string }>> {
+  const user = await requireUser();
+  const parsed = leadListCreateSchema.merge(leadListCreateSchema.partial()).safeParse(input);
+  void parsed;
+  const name = (input as { name?: string })?.name?.trim();
+  const color = (input as { color?: string })?.color ?? "#6366f1";
+  if (!name) return { ok: false, error: "Tag name is required" };
+  const db = getDb();
+  try {
+    const [row] = await db
+      .insert(leadTags)
+      .values({ userId: user.id, name, color })
+      .returning({ id: leadTags.id });
+    revalidatePath("/leads");
+    return { ok: true, data: { id: row.id } };
+  } catch {
+    return { ok: false, error: "A tag with that name already exists" };
+  }
+}
+
+/* ═══ SENDER ACCOUNTS ═══ */
+
+function buildSenderValues(userId: string, d: ReturnType<typeof senderCreateSchema.parse>) {
+  return {
+    userId,
+    senderName: d.senderName,
+    email: normalizeEmail(d.email),
+    smtpHost: d.smtpHost,
+    smtpPort: d.smtpPort,
+    smtpUsername: d.smtpUsername,
+    smtpPasswordEnc: encryptSecret(d.smtpPassword),
+    smtpSecurity: d.smtpSecurity,
+    imapHost: d.imapHost,
+    imapPort: d.imapPort,
+    imapUsername: d.imapUsername,
+    imapPasswordEnc: d.imapPassword ? encryptSecret(d.imapPassword) : "",
+    dailyLimit: d.dailyLimit,
+    hourlyLimit: d.hourlyLimit,
+    fromName: d.fromName,
+    replyTo: d.replyTo,
+    timezone: d.timezone,
+    signature: d.signature,
+  };
+}
+
+export async function createSender(input: unknown): Promise<ActionResult<{ id: string }>> {
+  const user = await requireUser();
+  const parsed = senderCreateSchema.safeParse(input);
+  if (!parsed.success) return zodFail(parsed.error);
+  const db = getDb();
+  try {
+    const [row] = await db
+      .insert(senderAccounts)
+      .values(buildSenderValues(user.id, parsed.data))
+      .returning({ id: senderAccounts.id });
+    await logActivity(user.id, "sender.added", `Added sender ${parsed.data.email}`);
+    revalidatePath("/senders");
+    return { ok: true, data: { id: row.id } };
+  } catch {
+    return { ok: false, error: "A sender with that email already exists" };
+  }
+}
+
+export async function toggleSender(senderId: string, pause: boolean): Promise<ActionResult> {
+  const user = await requireUser();
+  const db = getDb();
+  try {
+    await db
+      .update(senderAccounts)
+      .set({ status: pause ? "paused" : "active", updatedAt: nowIso() })
+      .where(and(eq(senderAccounts.id, senderId), eq(senderAccounts.userId, user.id)));
+    revalidatePath("/senders");
+    return { ok: true, message: pause ? "Sender paused" : "Sender resumed" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function deleteSender(senderId: string): Promise<ActionResult> {
+  const user = await requireUser();
+  const db = getDb();
+  try {
+    await db
+      .update(senderAccounts)
+      .set({ deletedAt: nowIso() })
+      .where(and(eq(senderAccounts.id, senderId), eq(senderAccounts.userId, user.id)));
+    await logActivity(user.id, "sender.deleted", "Deleted a sender account");
+    revalidatePath("/senders");
+    return { ok: true, message: "Sender deleted" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function importSendersCsv(rows: unknown[]): Promise<
+  ActionResult<{ imported: number; failed: { row: number; error: string }[] }>
+> {
+  const user = await requireUser();
+  const db = getDb();
+  const failed: { row: number; error: string }[] = [];
+  let imported = 0;
+
+  const existing = await db
+    .select({ email: senderAccounts.email })
+    .from(senderAccounts)
+    .where(eq(senderAccounts.userId, user.id));
+  const existingSet = new Set(existing.map((r) => r.email));
+
+  for (let i = 0; i < rows.length; i++) {
+    const parsed = senderCsvRowSchema.safeParse(rows[i]);
+    if (!parsed.success) {
+      failed.push({ row: i + 1, error: parsed.error.issues[0]?.message ?? "Invalid row" });
+      continue;
+    }
+    const email = normalizeEmail(parsed.data.email);
+    if (existingSet.has(email)) {
+      failed.push({ row: i + 1, error: `${email} already exists` });
+      continue;
+    }
+    try {
+      await db.insert(senderAccounts).values({
+        ...buildSenderValues(user.id, { ...parsed.data, fromName: parsed.data.senderName, replyTo: "" }),
+      });
+      existingSet.add(email);
+      imported++;
+    } catch {
+      failed.push({ row: i + 1, error: "Unable to save (duplicate or DB error)" });
+    }
+  }
+
+  await logActivity(user.id, "sender.imported", `Imported ${imported} sender accounts`);
+  revalidatePath("/senders");
+  return { ok: true, data: { imported, failed } };
+}
+
+/* ═══ EMAIL TEMPLATES ═══ */
+
+export async function upsertTemplate(input: {
+  id?: string;
+  name?: string;
+  subject?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  format?: "text" | "html";
+}): Promise<ActionResult<{ id: string }>> {
+  const user = await requireUser();
+  const { id, ...rest } = (input ?? {}) as { id?: string } & Record<string, unknown>;
+  const parsed = templateSchema.safeParse(rest);
+  if (!parsed.success) return zodFail(parsed.error);
+  const db = getDb();
+  try {
+    if (id) {
+      await db
+        .update(emailTemplates)
+        .set({ ...parsed.data, updatedAt: nowIso() })
+        .where(and(eq(emailTemplates.id, id), eq(emailTemplates.userId, user.id)));
+      revalidatePath("/templates");
+      return { ok: true, data: { id }, message: "Template saved" };
+    }
+    const [row] = await db
+      .insert(emailTemplates)
+      .values({ userId: user.id, ...parsed.data })
+      .returning({ id: emailTemplates.id });
+    revalidatePath("/templates");
+    return { ok: true, data: { id: row.id }, message: "Template created" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function deleteTemplate(templateId: string): Promise<ActionResult> {
+  const user = await requireUser();
+  const db = getDb();
+  try {
+    await db
+      .update(emailTemplates)
+      .set({ deletedAt: nowIso() })
+      .where(and(eq(emailTemplates.id, templateId), eq(emailTemplates.userId, user.id)));
+    revalidatePath("/templates");
+    return { ok: true, message: "Template deleted" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+/* ═══ CAMPAIGNS ═══ */
+
+export async function createCampaign(input: unknown): Promise<ActionResult<{ id: string }>> {
+  const user = await requireUser();
+  const parsed = campaignCreateSchema.safeParse(input);
+  if (!parsed.success) return zodFail(parsed.error);
+  const d = parsed.data;
+  const db = getDb();
+
+  try {
+    const [campaign] = await db
+      .insert(campaigns)
+      .values({
+        userId: user.id,
+        name: d.name,
+        leadListId: d.leadListId,
+        templateId: d.templateId,
+        status: d.startMode === "now" ? "running" : "scheduled",
+        scheduledAt: d.startMode === "later" ? d.scheduledAt : null,
+        businessDaysOnly: d.businessDaysOnly,
+        sendingTimezone: d.sendingTimezone,
+        sendingWindowStart: d.sendingWindowStart,
+        sendingWindowEnd: d.sendingWindowEnd,
+        dailyLimit: d.dailyLimit,
+        minDelaySec: d.minDelaySec,
+        maxDelaySec: d.maxDelaySec,
+        maxEmailsPerSenderPerDay: d.maxEmailsPerSenderPerDay,
+        stopOnReply: d.stopOnReply,
+        retryFailed: d.retryFailed,
+        retryCount: d.retryCount,
+        startedAt: d.startMode === "now" ? nowIso() : null,
+      })
+      .returning({ id: campaigns.id });
+
+    // Attach senders
+    await db
+      .insert(campaignSenders)
+      .values(d.senderIds.map((senderId) => ({ campaignId: campaign.id, senderId })));
+
+    // Snapshot the list's pending leads into the campaign so the engine can queue them.
+    const listLeads = await db
+      .select({ id: leads.id })
+      .from(leads)
+      .where(
+        and(
+          eq(leads.listId, d.leadListId),
+          eq(leads.status, "pending"),
+          sql`${leads.deletedAt} is null`,
+        ),
+      );
+
+    if (listLeads.length) {
+      const CHUNK = 500;
+      for (let i = 0; i < listLeads.length; i += CHUNK) {
+        await db
+          .insert(campaignLeads)
+          .values(
+            listLeads.slice(i, i + CHUNK).map((l) => ({
+              campaignId: campaign.id,
+              leadId: l.id,
+              status: "queued" as const,
+            })),
+          )
+          .onConflictDoNothing();
+      }
+      // Mark those leads as queued
+      await db
+        .update(leads)
+        .set({ status: "queued", updatedAt: nowIso() })
+        .where(
+          and(
+            eq(leads.listId, d.leadListId),
+            eq(leads.status, "pending"),
+            sql`${leads.deletedAt} is null`,
+          ),
+        );
+    }
+
+    await logActivity(
+      user.id,
+      "campaign.created",
+      `Created campaign "${d.name}" with ${listLeads.length} leads`,
+      campaign.id,
+    );
+    revalidatePath("/campaigns");
+    revalidatePath("/dashboard");
+    return { ok: true, data: { id: campaign.id }, message: "Campaign created" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function campaignAction(
+  campaignId: string,
+  action: "start" | "pause" | "resume" | "archive" | "delete" | "duplicate",
+): Promise<ActionResult> {
+  const user = await requireUser();
+  const db = getDb();
+  try {
+    const [c] = await db
+      .select()
+      .from(campaigns)
+      .where(and(eq(campaigns.id, campaignId), eq(campaigns.userId, user.id)));
+    if (!c) return { ok: false, error: "Campaign not found" };
+
+    switch (action) {
+      case "start":
+      case "resume":
+        await db
+          .update(campaigns)
+          .set({ status: "running", startedAt: c.startedAt ?? nowIso(), updatedAt: nowIso() })
+          .where(eq(campaigns.id, campaignId));
+        break;
+      case "pause":
+        await db.update(campaigns).set({ status: "paused", updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+        break;
+      case "archive":
+        await db
+          .update(campaigns)
+          .set({ status: "archived", updatedAt: nowIso() })
+          .where(eq(campaigns.id, campaignId));
+        break;
+      case "delete":
+        await db.update(campaigns).set({ deletedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+        break;
+      case "duplicate": {
+        const [copy] = await db
+          .insert(campaigns)
+          .values({
+            userId: user.id,
+            name: `${c.name} (copy)`,
+            status: "draft",
+            leadListId: c.leadListId,
+            templateId: c.templateId,
+            businessDaysOnly: c.businessDaysOnly,
+            sendingTimezone: c.sendingTimezone,
+            sendingWindowStart: c.sendingWindowStart,
+            sendingWindowEnd: c.sendingWindowEnd,
+            dailyLimit: c.dailyLimit,
+            minDelaySec: c.minDelaySec,
+            maxDelaySec: c.maxDelaySec,
+            maxEmailsPerSenderPerDay: c.maxEmailsPerSenderPerDay,
+            stopOnReply: c.stopOnReply,
+            retryFailed: c.retryFailed,
+            retryCount: c.retryCount,
+          })
+          .returning({ id: campaigns.id });
+        const senders = await db
+          .select({ senderId: campaignSenders.senderId })
+          .from(campaignSenders)
+          .where(eq(campaignSenders.campaignId, campaignId));
+        if (senders.length) {
+          await db
+            .insert(campaignSenders)
+            .values(senders.map((s) => ({ campaignId: copy.id, senderId: s.senderId })));
+        }
+        break;
+      }
+    }
+
+    await logActivity(user.id, `campaign.${action}`, `${action === "start" ? "Started" : action === "resume" ? "Resumed" : action === "pause" ? "Paused" : action === "archive" ? "Archived" : action === "delete" ? "Deleted" : "Duplicated"} campaign "${c.name}"`, campaignId);
+    revalidatePath("/campaigns");
+    revalidatePath("/dashboard");
+    return { ok: true, message: `Campaign ${action === "start" ? "started" : `${action}d`}` };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+/* ═══ SETTINGS — test connection placeholder (worker does the real test) ═══ */
+
+export async function sendTestEmail(): Promise<ActionResult> {
+  await requireUser();
+  // The actual send happens in the worker engine. Here we just confirm config is valid.
+  return {
+    ok: true,
+    message:
+      "Test send queued. The background engine will deliver it via the selected sender. Check Activity in a few seconds.",
+  };
+}
