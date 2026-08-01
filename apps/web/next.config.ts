@@ -9,7 +9,7 @@ const nextConfig: NextConfig = {
     "@smartreach/database",
     "@smartreach/email-engine",
   ],
-  serverExternalPackages: ["nodemailer", "imapflow", "better-auth", "@neondatabase/serverless"],
+  serverExternalPackages: ["nodemailer", "imapflow", "@neondatabase/serverless"],
   eslint: { ignoreDuringBuilds: true },
   typescript: { ignoreBuildErrors: false },
 };

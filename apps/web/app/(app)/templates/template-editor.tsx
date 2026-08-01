@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { renderTemplate } from "@smartreach/database";
+import { renderTemplate } from "@smartreach/database/template";
 import {
   Button,
   Input,

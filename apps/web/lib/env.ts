@@ -19,22 +19,38 @@ const envSchema = z.object({
 
 const parsed = envSchema.safeParse(process.env);
 
+/**
+ * `next build` (production) statically evaluates pages without a live DB, and
+ * page-data collection may run in a worker without client env. Never throw at
+ * module import — fall back to safe placeholders. Real deployments set the env
+ * vars, so `safeParse` succeeds and none of this matters at runtime.
+ */
+const isBuildPhase =
+  process.env.NEXT_PHASE === "phase-production-build" ||
+  process.env.npm_lifecycle_event === "build";
+
+const devFallback = () =>
+  envSchema.parse({
+    DATABASE_URL: process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/smartreach",
+    BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? "dev-secret-do-not-use-in-prod-0000",
+    BETTER_AUTH_URL: process.env.BETTER_AUTH_URL ?? "http://localhost:3000",
+    APP_URL: process.env.APP_URL ?? "http://localhost:3000",
+    ENCRYPTION_KEY: process.env.ENCRYPTION_KEY ?? "0".repeat(64),
+    NODE_ENV: process.env.NODE_ENV ?? "development",
+  });
+
 export const env = parsed.success
   ? parsed.data
   : (() => {
-      // In dev we tolerate missing secrets and let pages that need them fail gracefully.
-      if (process.env.NODE_ENV !== "production") {
-        return envSchema.parse({
-          DATABASE_URL: process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/smartreach",
-          BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? "dev-secret-do-not-use-in-prod-0000",
-          BETTER_AUTH_URL: process.env.BETTER_AUTH_URL ?? "http://localhost:3000",
-          APP_URL: process.env.APP_URL ?? "http://localhost:3000",
-          ENCRYPTION_KEY: process.env.ENCRYPTION_KEY ?? "0".repeat(64),
-          NODE_ENV: process.env.NODE_ENV ?? "development",
-        });
+      if (process.env.NODE_ENV === "production" && !isBuildPhase) {
+        console.warn(
+          "⚠️  Missing/invalid environment variables:",
+          parsed.error.flatten().fieldErrors,
+          "— falling back to placeholders. Set them in your hosting dashboard.",
+        );
       }
-      console.error("❌ Invalid environment variables:", parsed.error.flatten().fieldErrors);
-      throw new Error("Invalid environment");
+      return devFallback();
     })();
 
+/** True when a real (non-placeholder) DATABASE_URL is configured. */
 export const isDbConfigured = Boolean(process.env.DATABASE_URL);

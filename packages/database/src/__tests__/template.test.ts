@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { extractVariables, renderTemplate, validateTemplateSyntax } from "../template";
 import { decryptSecret, encryptSecret } from "../crypto";
 
@@ -44,6 +44,10 @@ describe("validateTemplateSyntax", () => {
 });
 
 describe("crypto", () => {
+  // A stable key so the crypto round-trip is self-contained in CI/no-env runs.
+  beforeAll(() => {
+    process.env.ENCRYPTION_KEY = "a".repeat(64);
+  });
   it("round-trips a secret", () => {
     const enc = encryptSecret("super-secret-pw");
     expect(enc).not.toContain("super-secret-pw");

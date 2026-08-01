@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import { Logo } from "@/components/logo";
 import { getSession } from "@/lib/session";
 
+export const dynamic = "force-dynamic";
+
 export default async function Landing() {
   const session = await getSession();
   if (session?.user) redirect("/dashboard");
