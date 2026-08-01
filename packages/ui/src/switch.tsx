@@ -10,21 +10,22 @@ export const Switch = React.forwardRef<
   <SwitchPrimitives.Root
     ref={ref}
     className={cn(
-      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors",
-      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+      "peer inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 transition-colors duration-200",
+      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
       "disabled:cursor-not-allowed disabled:opacity-50",
-      // unchecked: clearly grey/dim; checked: clearly filled
-      "data-[state=checked]:bg-primary data-[state=checked]:border-primary data-[state=checked]:shadow-[0_0_0_3px_hsl(var(--primary)/0.25)]",
-      "data-[state=unchecked]:bg-input data-[state=unchecked]:border-border/80",
+      // checked: bright, clearly ON
+      "data-[state=checked]:bg-primary data-[state=checked]:border-primary data-[state=checked]:shadow-[0_0_10px_2px_rgba(99,102,241,0.45)]",
+      // unchecked: clearly grey track + border so you can SEE it's a control
+      "data-[state=unchecked]:bg-zinc-400 data-[state=unchecked]:border-zinc-400 dark:data-[state=unchecked]:bg-zinc-600 dark:data-[state=unchecked]:border-zinc-500",
       className,
     )}
     {...props}
   >
     <SwitchPrimitives.Thumb
       className={cn(
-        "pointer-events-none block size-4 rounded-full bg-background shadow-md ring-0 transition-transform",
-        "data-[state=checked]:translate-x-4 data-[state=checked]:bg-primary-foreground",
+        "pointer-events-none block size-5 rounded-full bg-white shadow-lg ring-0 transition-transform duration-200 will-change-transform",
         "data-[state=unchecked]:translate-x-0.5",
+        "data-[state=checked]:translate-x-[22px]",
       )}
     />
   </SwitchPrimitives.Root>
