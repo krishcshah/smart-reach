@@ -1,16 +1,21 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Only genuinely-Node packages are external. Keep better-auth + drizzle-orm OUT of this
-  // list so webpack bundles them into a single consistent module graph (avoids the
-  // "(0 , drizzle_orm.eq) is not a function" module-identity bug with the auth adapter).
-  serverExternalPackages: ["nodemailer", "imapflow", "@neondatabase/serverless"],
+  // Keep better-auth + its adapter bundled (single module graph → no `eq is not a function`),
+  // but leave the DB driver trio EXTERNAL so webpack never tries to bundle raw `drizzle-orm`
+  // (its ESM layout breaks the browser/client-module graph when server actions are imported).
+  serverExternalPackages: [
+    "nodemailer",
+    "imapflow",
+    "@neondatabase/serverless",
+    "drizzle-orm",
+    "@smartreach/database",
+    "@smartreach/email-engine",
+  ],
   transpilePackages: [
     "@smartreach/ui",
     "@smartreach/shared",
     "@smartreach/validation",
-    "@smartreach/database",
-    "@smartreach/email-engine",
     "better-auth",
     "@better-auth/drizzle-adapter",
   ],
