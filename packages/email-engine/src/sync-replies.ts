@@ -147,23 +147,36 @@ async function recordReplyIfNew(db: EngineDb, sender: SenderRow, msg: any): Prom
   }
   if (!lead) return false; // not a campaign recipient — ignore
 
-  // Prefer the HTML body so the client renders formatting/images like a real
-  // mail client. Fall back to clean text if there's no HTML part.
-  let bodyText = "";
-  let html = "";
-  if (msg.bodyParts?.get?.("text") ||
-      msg.bodyParts?.get?.("2") || msg.bodyParts?.get?.("1.1") || msg.bodyParts?.get?.("2.1")) {
-    const rawText = msg.bodyParts.get("text")?.toString?.() ?? "";
-    bodyText = cleanEmailBody(rawText);
-  }
-  // whatever html-ish part exists → capture decoded html
-  for (const key of ["text", "2", "1.1", "2.1"]) {
-    const v = msg.bodyParts?.get?.(key)?.toString?.() ?? "";
-    if (v && /<[^>]+>/.test(v)) { html = v; break; }
-  }
-  // if we have HTML, use it as the render payload; otherwise clean text only
-  const snippet = (html ? bodyText : bodyText).replace(/\s+/g, " ").slice(0, 280);
-  const payload = html || bodyText;
+  // Pull the actual message body parts. Prefer the HTML body (rendered in
+  // the client), fall back to the text part, else envelope's text.
+  const getPart = (...keys: string[]): string => {
+    for (const k of keys) {
+      const v = msg.bodyParts?.get?.(k)?.toString?.();
+      if (v) return v;
+    }
+    return "";
+  };
+  let payload = getPart("text", "1.2", "2.1", "1.1");
+  // strip any leading MIME header lines (Content-Type/Transfer-Encoding/etc.)
+  // that leak through when a part is fetched raw
+  payload = payload.replace(/^(?:content-[\w-]+:\s*[^\n]*\r?\n)+/i, "").trim();
+  // decode quoted-printable + HTML entities
+  payload = payload
+    // remove any MIME boundary lines + their embedded Content-Type headers so
+    // only human-readable content remains (mid-body junk disappears)
+    .replace(/^\s*--[0-9A-Za-z=_-]{8,}.*$/gm, "")
+    .replace(/^\s*content-type:[^\n]*\r?\n/gim, "")
+    .replace(/^\s*content-transfer-encoding:[^\n]*\r?\n/gim, "")
+    .replace(/=\r?\n/g, "")
+    .replace(/=([0-9A-Fa-f]{2})/g, (_m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/</g, "<")
+    .replace(/>/g, ">")
+    .replace(/&/g, "&")
+    .replace(/"/g, '"')
+    .replace(/&#39;|'/g, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  const snippet = payload.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 280);
   const receivedAt = (env.date ? new Date(env.date) : new Date()).toISOString();
   const nowS = new Date().toISOString();
 
