@@ -34,7 +34,7 @@ export async function syncSenderReplies(db: EngineDb, sender: SenderRow): Promis
     if (list.length > 0) {
       for await (const msg of client.fetch(
         list,
-        { uid: true, envelope: true, bodyParts: ["text"] },
+        { uid: true, envelope: true, bodyParts: ["text", "1", "1.1", "2", "2.1"] },
         { uid: true },
       )) {
         try {
@@ -147,9 +147,23 @@ async function recordReplyIfNew(db: EngineDb, sender: SenderRow, msg: any): Prom
   }
   if (!lead) return false; // not a campaign recipient — ignore
 
-  const raw = msg.bodyParts?.get?.("text")?.toString?.() ?? "";
-  const bodyText = cleanEmailBody(raw);
-  const snippet = bodyText.replace(/\s+/g, " ").slice(0, 280);
+  // Prefer the HTML body so the client renders formatting/images like a real
+  // mail client. Fall back to clean text if there's no HTML part.
+  let bodyText = "";
+  let html = "";
+  if (msg.bodyParts?.get?.("text") ||
+      msg.bodyParts?.get?.("2") || msg.bodyParts?.get?.("1.1") || msg.bodyParts?.get?.("2.1")) {
+    const rawText = msg.bodyParts.get("text")?.toString?.() ?? "";
+    bodyText = cleanEmailBody(rawText);
+  }
+  // whatever html-ish part exists → capture decoded html
+  for (const key of ["text", "2", "1.1", "2.1"]) {
+    const v = msg.bodyParts?.get?.(key)?.toString?.() ?? "";
+    if (v && /<[^>]+>/.test(v)) { html = v; break; }
+  }
+  // if we have HTML, use it as the render payload; otherwise clean text only
+  const snippet = (html ? bodyText : bodyText).replace(/\s+/g, " ").slice(0, 280);
+  const payload = html || bodyText;
   const receivedAt = (env.date ? new Date(env.date) : new Date()).toISOString();
   const nowS = new Date().toISOString();
 
@@ -164,7 +178,7 @@ async function recordReplyIfNew(db: EngineDb, sender: SenderRow, msg: any): Prom
       fromEmail,
       subject: env.subject ?? "",
       snippet,
-      bodyText,
+      bodyText: payload,
       messageId,
       receivedAt,
     });

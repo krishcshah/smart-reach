@@ -13,6 +13,32 @@ interface ReplyRow {
   campaignName: string | null; senderEmail: string | null; senderName: string | null;
 }
 
+/** Sanitize reply html (strip scripts/iframes/forms) then render in a sandboxed iframe
+ * so it looks like a real mail client. Falls back to text if it's not HTML. */
+function EmailBody({ html }: { html: string }) {
+  const isHtml = /<\/?[a-z][\s\S]*?>/.test(html);
+  const sanitized = html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<form[\s\S]*?<\/form>/gi, "")
+    .replace(/<object[\s\S]*?<\/object>/gi, "")
+    .replace(/<embed[\s\S]*?>/gi, "")
+    .replace(/on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/javascript:/gi, "")
+    .replace(/<base[\s\S]*?>/gi, "");
+  if (!isHtml) {
+    return <div className="whitespace-pre-wrap rounded-lg border bg-background/60 p-4 text-sm leading-relaxed text-foreground/90">{html}</div>;
+  }
+  return (
+    <iframe
+      title="reply body"
+      className="h-full w-full rounded-lg border bg-white"
+      sandbox="allow-same-origin"
+      srcDoc={`<!doctype html><html><head><style>body{margin:0;padding:18px;font:14px/1.6 -apple-system,sans-serif;color:#0a1128;background:#fff;}img{max-width:100%}blockquote{margin:0;padding-left:1em;border-left:3px solid #ddd}</style></head><body>${sanitized}</body></html>`}
+    />
+  );
+}
+
 export function UniboxClient({ initial }: { initial: ReplyRow[] }) {
   const router = useRouter();
   const [activeId, setActiveId] = useState<string | null>(initial[0]?.id ?? null);
@@ -80,10 +106,8 @@ export function UniboxClient({ initial }: { initial: ReplyRow[] }) {
                     </div>
                     <button type="button" aria-label="Close" onClick={() => setActiveId(null)} className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent"><X className="size-4" /></button>
                   </div>
-                  <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-                    <div className="whitespace-pre-wrap rounded-lg border bg-background/60 p-4 text-sm leading-relaxed text-foreground/90">
-                      {r.bodyText || r.snippet}
-                    </div>
+                  <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                    <EmailBody html={r.bodyText || r.snippet || ""} />
                   </div>
                   <div className="border-t border-border/60 px-5 py-3">
                     <label className="mb-2 block text-xs font-medium text-muted-foreground">Reply via {r.senderEmail ?? "your sender"}</label>
