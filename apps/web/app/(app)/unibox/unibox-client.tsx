@@ -31,7 +31,7 @@ export function UniboxClient({ initial }: { initial: ReplyRow[] }) {
   };
 
   return (
-    <div className="flex h-[calc(100vh-120px)] flex-col">
+    <div className="unibox-root flex h-dvh flex-col lg:-ml-60 lg:pl-60">
       <header className="flex items-center justify-between pb-3">
         <h1 className="flex items-center gap-2 text-lg font-semibold">
           <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400"><Inbox className="size-4" /></span>

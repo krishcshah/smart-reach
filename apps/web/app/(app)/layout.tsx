@@ -12,7 +12,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <NavigationProgress />
       <AppSidebar user={session.user} />
       <main className="flex-1 min-w-0 lg:pl-60">
-        <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">{children}</div>
+        <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8 [&:has(>.unibox-root)]:max-w-none [&:has(>.unibox-root)]:p-0">
+          {children}
+        </div>
       </main>
       <CommandPalette />
     </div>
