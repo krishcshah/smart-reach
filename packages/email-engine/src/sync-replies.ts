@@ -66,6 +66,33 @@ export async function syncSenderReplies(db: EngineDb, sender: SenderRow): Promis
   }
 }
 
+/** Strip MIME boundaries, headers, and quoted-printable escapes so the thread
+ * shows the human text, not raw envelope noise. */
+function cleanEmailBody(raw: string): string {
+  let s = raw;
+  // decode quoted-printable (=3D, =\n, =XX) — cheap but effective
+  s = s
+    .replace(/=\r?\n/g, "")
+    .replace(/=([0-9A-Fa-f]{2})/g, (_m, h) => String.fromCharCode(parseInt(h, 16)));
+  // cut at first MIME boundary marker / html part
+  const boundaryIdx = s.search(/^--[0-9a-zA-Z=_-]{8,}/m);
+  if (boundaryIdx > 0) s = s.slice(0, boundaryIdx);
+  // drop any residual header block before a blank line
+  if (/^[A-Za-z-]+:\s/m.test(s.slice(0, 400))) {
+    const firstBlank = s.search(/\r?\n\r?\n/);
+    if (firstBlank > 0) s = s.slice(firstBlank + 2);
+  }
+  // strip tags that survive
+  s = s.replace(/<[^>]+>/g, (m) => (/div|p|br|li/i.test(m) ? "\n" : ""));
+  // normalize whitespace lines, trim, cap
+  s = s
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return s.slice(0, 3000);
+}
+
 async function recordReplyIfNew(db: EngineDb, sender: SenderRow, msg: any): Promise<boolean> {
   const env = msg.envelope ?? {};
   const fromRaw: string = env.from?.[0]?.address ?? "";
@@ -120,7 +147,8 @@ async function recordReplyIfNew(db: EngineDb, sender: SenderRow, msg: any): Prom
   }
   if (!lead) return false; // not a campaign recipient — ignore
 
-  const bodyText = (msg.bodyParts?.get?.("text")?.toString?.() ?? "").slice(0, 20_000);
+  const raw = msg.bodyParts?.get?.("text")?.toString?.() ?? "";
+  const bodyText = cleanEmailBody(raw);
   const snippet = bodyText.replace(/\s+/g, " ").slice(0, 280);
   const receivedAt = (env.date ? new Date(env.date) : new Date()).toISOString();
   const nowS = new Date().toISOString();
